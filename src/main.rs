@@ -352,10 +352,24 @@ const MAX_WINDOWS_PER_REQUEST: usize = 30;
 /// After feeding a swipe, how long to wait for the next scan of the same
 /// request (the next enroll stage, or a retry) before closing the capture.
 const NEXT_SCAN_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
+/// When a request ends unanswered, how long to wait for a retry (the lock screen
+/// restarts its verify 250 ms after a timeout) before closing the capture.
+const HANDOVER_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
+/// How long a used calibration stays armed for the next request before the
+/// capture is closed and recalibrated.
+const REUSE_WINDOW: std::time::Duration = std::time::Duration::from_secs(120);
 
-/// Serve one fingerprint request: calibrate once, then open imaging windows back
-/// to back, feeding each swipe as soon as its window closes, until nothing is
-/// waiting for a finger any more. Returns the number of swipes fed.
+/// How long an armed (calibrated) capture may sit idle before it is closed and
+/// recalibrated, so the calibration tracks temperature. `VFS_REARM_SECS`.
+fn rearm_after() -> std::time::Duration {
+    let secs = std::env::var("VFS_REARM_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(300);
+    std::time::Duration::from_secs(secs)
+}
+
+/// Serve one fingerprint request on an already-armed capture (calibrated ahead
+/// of time while idle): open imaging windows back to back, feeding each swipe as
+/// soon as its window closes, until nothing is waiting for a finger any more.
+/// Returns the number of swipes fed. The caller closes the capture.
 fn serve_request(
     cap: &mut capture::Capture,
     mut listener: std::os::unix::net::UnixStream,
@@ -365,15 +379,30 @@ fn serve_request(
     fprintd: bool,
     once: bool,
 ) -> Result<usize> {
-    cap.prepare()?;
     let mut fed = 0;
     for _ in 0..MAX_WINDOWS_PER_REQUEST {
         if !virtimage::still_wanted(&listener, fprintd) {
-            break;
+            // A lock screen retries a timed-out verify right away: hand the
+            // armed capture to the retry instead of going dark to recalibrate.
+            match virtimage::wait_for_request(sock, fprintd, Some(HANDOVER_WAIT)) {
+                Some(next) => {
+                    log::info!("request replaced by a retry; still recording");
+                    listener = next;
+                }
+                None => break,
+            }
         }
         let stream = cap.window()?;
         let Some((px, w, h)) = swipe_from_window(&stream, dli, min_contact) else { continue };
-        match virtimage::send_on(&mut listener, &px, w, h) {
+        let mut sent = virtimage::send_on(&mut listener, &px, w, h);
+        if sent.is_err() {
+            // The request ended mid-swipe; a retry may already be waiting for it.
+            if let Some(next) = virtimage::wait_for_request(sock, fprintd, Some(HANDOVER_WAIT)) {
+                listener = next;
+                sent = virtimage::send_on(&mut listener, &px, w, h);
+            }
+        }
+        match sent {
             Ok(()) => fed += 1,
             Err(e) => log::warn!("captured {w}x{h} but the request was gone: {e}"),
         }
@@ -386,8 +415,46 @@ fn serve_request(
             None => break,
         }
     }
-    cap.finish()?;
     Ok(fed)
+}
+
+/// What ended one armed period of the daemon.
+enum Armed {
+    /// Served a request; holds the number of swipes fed.
+    Served(usize),
+    /// Sat idle past `rearm_after()`; recalibrate.
+    Stale,
+}
+
+/// Calibrate now (no finger needed, LED off), then wait for a request with the
+/// calibration already done, so the first swipe window opens immediately.
+fn arm_and_serve(
+    cap: &mut capture::Capture,
+    sock: &str,
+    dli: &image::DliConfig,
+    min_contact: usize,
+    fprintd: bool,
+    once: bool,
+) -> Result<Armed> {
+    cap.prepare()?;
+    log::info!("armed: calibrated, waiting for a fingerprint request");
+    // After a request, stay armed for REUSE_WINDOW so a follow-up (the lock
+    // screen restarting its verify on wake) gets the LED at once instead of
+    // waiting out a recalibration.
+    let mut fed = None;
+    loop {
+        let wait = if fed.is_some() { REUSE_WINDOW } else { rearm_after() };
+        let Some(listener) = virtimage::wait_for_request(sock, fprintd, Some(wait)) else { break };
+        log::info!("fingerprint requested; recording swipes");
+        let n = serve_request(cap, listener, sock, dli, min_contact, fprintd, once)?;
+        log::info!("request served: {n} swipe(s) fed");
+        fed = Some(fed.unwrap_or(0) + n);
+        if once {
+            break;
+        }
+    }
+    cap.finish()?;
+    Ok(fed.map_or(Armed::Stale, Armed::Served))
 }
 
 /// Feeder loop: when a fingerprint is requested, capture swipes and push them to
@@ -410,17 +477,32 @@ fn run_daemon(
     log::info!("vfs495 feeder daemon: socket {sock}, min_contact {min_contact}");
     log::info!("idle until a fingerprint is requested (enroll/verify), then capturing");
 
-    let mut dev = usb::Sensor::open()?;
-    let mut rec = session::handshake(&dev, cfg)?;
+    // The sensor can be mid re-enumeration at startup (service restart, resume
+    // from sleep): retry the first open + handshake instead of exiting.
+    let mut attempt = 0;
+    let (mut dev, mut rec) = loop {
+        attempt += 1;
+        match usb::Sensor::open().and_then(|dev| session::handshake(&dev, cfg).map(|rec| (dev, rec))) {
+            Ok(pair) => break pair,
+            Err(e) if attempt < 20 => {
+                log::warn!("sensor not ready ({e}); retrying");
+                std::thread::sleep(std::time::Duration::from_secs(1));
+            }
+            Err(e) => return Err(e),
+        }
+    };
     loop {
-        // Capture only while something is waiting for a fingerprint: the sensor
-        // stays idle otherwise, and no stale image is ever queued.
-        let Some(listener) = virtimage::wait_for_request(sock, fprintd, None) else { continue };
-        log::info!("fingerprint requested; calibrating, then recording swipes");
+        // Calibrate ahead of time, then capture only while something is waiting
+        // for a fingerprint, so no stale image is ever queued. An idle armed
+        // capture is recalibrated every `rearm_after()`.
         let served = capture::Capture::new(&mut dev, &mut rec, base, cfg)
-            .and_then(|mut cap| serve_request(&mut cap, listener, sock, &dli, min_contact, fprintd, once));
+            .and_then(|mut cap| arm_and_serve(&mut cap, sock, &dli, min_contact, fprintd, once));
         match served {
-            Ok(fed) => log::info!("request served: {fed} swipe(s) fed"),
+            Ok(Armed::Served(fed)) => log::debug!("armed period over ({fed} swipe(s) fed); recalibrating"),
+            Ok(Armed::Stale) => {
+                log::debug!("idle past rearm interval; recalibrating");
+                continue;
+            }
             Err(e) => {
                 // The session/device faulted (e.g. the sensor dropped off the bus).
                 // Rebuild it rather than tight-looping: back off (also lets a USB
