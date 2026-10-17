@@ -1750,3 +1750,50 @@ closes, reconnects for the next scan (waits up to 3 s for one), and sends the cl
 commands when nothing wants a finger any more (max 30 windows per request). The LED is lit
 ~3 s out of every ~4 s after the initial ~9 s. `arm_capture` (used by `run`, `capture`,
 `ridge-probe`, live_enroll.py) still replays the whole recorded sequence.
+
+### 2026-10-16 — second device: HP ProBook 650 G4 (Arch/Omarchy); lock-screen daemon fixes
+Same sensor (`138a:003f`, unowned 65535/65535), device data harvested from sp84530 under gdb
+with a swipe, as before. Device data (`capture_seq.json`, `dli_config.json`, patches) stays
+out of git per `.gitignore`. This sensor's `modulus.json` **differs** from the committed one,
+so it was not committed. Overwriting it would break the original device; the value is
+evidently per-device (or per-install), not a constant in HP's binary.
+
+**Trace shape differs.** The ProBook's recorded sequence has a single imaging unit: `0..20`
+setup + calibration, then (poll 21, imaging 22, bare `0x17` 23, `0x04` 24), then closing
+`25..26`, against two units at 22-25/26-29 and closing `30..41` here. On this branch
+`SWIPE_WINDOWS`/`WINDOW_UNIT`/`PREPARE`/`FINISH` are set to the ProBook values. **They must
+be derived from the loaded sequence before this can go upstream.**
+
+**GetFingerState must be polled.** One bare `0x17` closes the window before the finger
+arrives and no image comes back. HP polls it in a loop while the window streams (58 polls on
+a good swipe). The capture now repeats a bare `0x17` up to `VFS_FINGER_POLLS` (default 60)
+times, stopping once the EP2 burst (>64 KiB) is seen and then drains empty.
+
+**Daemon pre-arms.** It calibrates while idle, then waits for a request already calibrated,
+so the LED lights in under a second instead of after about 9 s. An idle armed capture is
+recalibrated every `VFS_REARM_SECS` (default 300; the service sets 3600). The startup
+open+handshake retries 20x at 1 s, which covers re-enumeration after a service restart or
+resume. Before, it exited with `EP_OUT write failed: No such device`.
+
+**Lock screens retry, so requests overlap.** Omarchy's lock screen (Quickshell, PAM
+`pam_fprintd`) restarts verify 250 ms after each 30 s fprintd timeout. Seen live: the daemon
+finished the old request, then recalibrated for about 10 s while the new verify waited, LED
+dark. A swipe captured just after the old request closed was dropped ("request was gone"),
+and that swipe would probably have matched. Fixes:
+- `serve_request`: when the request is no longer wanted, wait `HANDOVER_WAIT` (3 s) for a
+  follow-up and keep recording on it ("request replaced by a retry"). A swipe whose send
+  fails is re-sent to the follow-up.
+- `arm_and_serve`: after a request, stay armed for `REUSE_WINDOW` (120 s) before
+  recalibrating.
+Verified 2026-10-16 21:55: verify timed out at 30 s, recording continued through the retry
+with no gap, and one swipe unlocked.
+
+**Falsified: tying verify to display blank/wake.** Aborting the PAM verify when the locked
+display blanks and restarting it on wake made unlocking impossible. The lock screen blanks
+5 s after the last mouse/key input, and a swipe is not input, so it blanked mid-swipe.
+Aborting the PAM client also left fprintd's verify open until its own 30 s timeout, so
+verifies overlapped ("Failed to match", stale requests). Reverted.
+
+**Calibration drift (in progress).** Calibration results are now logged on target
+`vfs495::calib` with the ACPI board temperature. ProBook values: PgaOffset 138-139, Adc
+131-135, PgaGain 7 over 40-60 °C. Nearly stable so far.

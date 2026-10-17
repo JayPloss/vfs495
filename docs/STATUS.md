@@ -406,6 +406,16 @@ daemon — see the README "GNOME / fprintd integration" section.
 
 ---
 
+### Second device: HP ProBook 650 G4 (2026-10-16, branch `hp-probook-650-g4`)
+
+Works end to end through fprintd/PAM (sudo, polkit, the Omarchy lock screen). This
+device needed polled GetFingerState and has a one-unit trace shape, so the window
+index constants are set for it on that branch. They must be derived from the loaded
+sequence before merging. Its `modulus.json` differs from the committed one. The
+daemon now pre-arms (calibrates while idle), retries startup during re-enumeration,
+hands an armed capture to a lock screen's verify retry, and stays armed 120 s after
+a request. Details and evidence: NOTES.md 2026-10-16.
+
 ## 8. Current status and remaining work
 
 **Done and live-confirmed:**
