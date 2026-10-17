@@ -42,7 +42,8 @@ fn load_sequence(base: &Path) -> Result<Vec<Vec<u8>>> {
 /// key). Each opens a ~2.5 s window in which the sensor streams image lines; a
 /// swipe must happen inside it (live-measured: the old cue, printed at idx 16,
 /// came ~4 s before the first window and made users miss it).
-const SWIPE_WINDOWS: [usize; 2] = [23, 27];
+// ProBook 650 G4 trace: one imaging window (21 poll, 22 image, 23 0x17, 24 0x04).
+const SWIPE_WINDOWS: [usize; 1] = [22];
 
 /// A user cue, one short colored line: red = don't touch, green = swipe,
 /// yellow = wait. Kept to one or two words so it can be acted on at a glance.
@@ -98,6 +99,22 @@ const EP2_BURST_MS: u64 = 2500;
 /// bound is by time rather than by read count.
 fn drain_image_into(dev: &Sensor, img: &mut Vec<u8>, quiet_reads: usize) {
     drain_image_bounded(dev, img, quiet_reads, 6000);
+}
+
+/// First non-zero ACPI board temperature, e.g. "43.0C" — logged next to each
+/// calibration result to see whether the values drift with heat.
+fn board_temp() -> String {
+    let Ok(zones) = std::fs::read_dir("/sys/class/thermal") else { return "?".into() };
+    let mut zones: Vec<_> = zones.flatten().map(|z| z.path()).collect();
+    zones.sort();
+    for z in zones {
+        let ty = std::fs::read_to_string(z.join("type")).unwrap_or_default();
+        let t: i64 = std::fs::read_to_string(z.join("temp")).ok().and_then(|s| s.trim().parse().ok()).unwrap_or(0);
+        if ty.trim() == "acpitz" && t > 0 {
+            return format!("{:.1}C", t as f64 / 1000.0);
+        }
+    }
+    "?".into()
 }
 
 fn drain_image_bounded(dev: &Sensor, img: &mut Vec<u8>, quiet_reads: usize, max_ms: u64) {
@@ -443,11 +460,11 @@ pub fn poll_probe(
 /// command itself (`SWIPE_WINDOWS[1]`), and the two that close it. Live-checked
 /// 2026-10-04: repeating this unit keeps returning full image bursts with no
 /// recalibration.
-const WINDOW_UNIT: std::ops::RangeInclusive<usize> = 26..=29;
+const WINDOW_UNIT: std::ops::RangeInclusive<usize> = 21..=24;
 /// Everything before the first window: setup, calibration (no finger!), arming.
-const PREPARE: std::ops::Range<usize> = 0..22;
+const PREPARE: std::ops::Range<usize> = 0..21;
 /// The recorded sequence's closing commands, sent when a request is over.
-const FINISH: std::ops::Range<usize> = 30..42;
+const FINISH: std::ops::Range<usize> = 25..27;
 
 /// One in-session capture: replays the command sequence as AppData records (all
 /// in-session commands are `0x17` records on EP1 regardless of their inner
@@ -528,7 +545,8 @@ impl<'a> Capture<'a> {
             // The swipe cue goes on exactly when an imaging command is sent.
             if SWIPE_WINDOWS.contains(&i) {
                 cue(Cue::Swipe, self.prompt);
-            } else if i.checked_sub(1).is_some_and(|p| SWIPE_WINDOWS.contains(&p)) {
+            } else if i.checked_sub(2).is_some_and(|p| SWIPE_WINDOWS.contains(&p)) {
+                // (window stays open through the GetFingerState polls at +1)
                 cue(Cue::Wait, self.prompt);
             }
             let cmd_op = plain[0];
@@ -543,8 +561,25 @@ impl<'a> Capture<'a> {
             // whether the sensor enters an imaging mode that streams EP2 frames without
             // a fresh session (i.e. whether the re-handshake is what causes the reset loop).
             let recover = if std::env::var("VFS_NO_REHANDSHAKE").is_ok() { None } else { Some(self.cfg) };
+            // HP polls GetFingerState (bare 0x17) in a loop while the imaging window
+            // streams (58 polls on a good ProBook 650 G4 swipe); a single poll closes
+            // the window before the finger arrives. VFS_FINGER_POLLS sets the count.
+            let reps = if plain.as_slice() == [0x17] {
+                std::env::var("VFS_FINGER_POLLS").ok().and_then(|v| v.parse().ok()).unwrap_or(60usize)
+            } else {
+                1
+            };
+            let mut last_state: Option<Vec<u8>> = None;
+            let mut burst_seen = false;
+            for rep in 0..reps {
             let mut img = Vec::new(); // this command's raw (encrypted) EP2 bytes
             match send_cmd_draining(self.dev, self.rec, &plain, recover, Some(&mut img)) {
+                Some((payload, status)) if reps > 1 => {
+                    if last_state.as_deref() != Some(&payload[..]) {
+                        log::info!("[{i:3}] poll {rep:3}: finger state {} (status 0x{status:04x})", hex::encode(&payload));
+                        last_state = Some(payload);
+                    }
+                }
                 Some((_, RESET_SKIPPED)) => {
                     log::info!(
                         "[{i:3}] cmd=0x{cmd_op:02x} -> RE-ENUM, skipped (HP-resume); next cmd tests session survival"
@@ -570,8 +605,14 @@ impl<'a> Capture<'a> {
             drain_image_bounded(self.dev, &mut img, 3, EP2_BURST_MS);
             let slice = &img[..];
             if slice.is_empty() {
+                // Image burst over: stop polling GetFingerState, close the window.
+                if reps > 1 && burst_seen {
+                    log::info!("[{i:3}] burst done after {rep} polls");
+                    break;
+                }
                 continue;
             }
+            burst_seen |= slice.len() > 65536;
             let (mean, sd) = mean_sd(slice);
             log::info!("[{i:3}]   EP2 +{}B mean={mean:.1} sd={sd:.1}", slice.len());
             // Diagnostic: dump each command's raw EP2 slice (calibration RE).
@@ -585,7 +626,7 @@ impl<'a> Capture<'a> {
             if let Some(applied) =
                 calib.then(|| crate::calib::carry_forward(i, slice, &mut self.seq[i + 1..])).flatten()
             {
-                log::info!("[{i:3}]   calibration: {applied}");
+                log::info!(target: "vfs495::calib", "[{i:3}] {applied} board={}", board_temp());
             }
             // Decrypt this command's EP2 slice under the active image key, chaining
             // the CBC IV forward for the next slice (matches HP's per-read decrypt).
@@ -595,6 +636,7 @@ impl<'a> Capture<'a> {
                     self.cur_iv.copy_from_slice(&slice[slice.len() - 16..]);
                 }
                 out.extend_from_slice(&pt);
+            }
             }
         }
         Ok(out)
