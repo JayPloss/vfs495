@@ -332,7 +332,21 @@ fn swipe_from_window(stream: &[u8], dli: &image::DliConfig, min_contact: usize) 
     };
     // Enlarge and clamp the pixels we actually feed to a libfprint-acceptable height.
     let (fpx, fw, fh) = image::window_for_feed(&px, w, h);
-    log::info!("finger captured: {w}x{h} ({contact} contact rows); feeding {fw}x{fh}");
+    log::info!(
+        "finger captured: {w}x{h} ({contact} contact rows, {} lines, {} bytes); feeding {fw}x{fh}",
+        lines.rows,
+        stream.len()
+    );
+    // VFS_SAVE_FED=<dir>: keep each fed swipe's decrypted stream and image for
+    // offline analysis. These are fingerprint images: use a root-only dir.
+    if let Ok(dir) = std::env::var("VFS_SAVE_FED") {
+        let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
+        if let Err(e) = std::fs::write(format!("{dir}/fed_{ts}.stream"), stream)
+            .and_then(|_| image::write_pgm(&format!("{dir}/fed_{ts}.pgm"), &px, w, h).map_err(std::io::Error::other))
+        {
+            log::warn!("VFS_SAVE_FED: {e}");
+        }
+    }
     Some((fpx, fw as u32, fh as u32))
 }
 

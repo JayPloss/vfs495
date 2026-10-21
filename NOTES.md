@@ -1797,3 +1797,27 @@ verifies overlapped ("Failed to match", stale requests). Reverted.
 **Calibration drift (in progress).** Calibration results are now logged on target
 `vfs495::calib` with the ACPI board temperature. ProBook values: PgaOffset 138-139, Adc
 131-135, PgaGain 7 over 40-60 °C. Nearly stable so far.
+
+### 2026-10-20 — CPU starvation under load (dictation); daemon logs line/byte counts and can save fed swipes
+
+Symptom: polkit fingerprint prompts failed while voxtype dictation was transcribing
+on every core (5 of 5 swipes no-match, 262–313 rows; one request never armed —
+the LED lit and went straight off). Controlled test, same finger, one swipe each:
+idle 440/439 rows, both match; under a 12-thread busy loop, one request got no
+capture at all and the other came out 331 rows, no match.
+
+Fix (system side, paqman repo `vfs495-priority.conf`): the service runs
+`CPUSchedulingPolicy=rr`, priority 20, realtime I/O. After it, 3 idle + 3 loaded:
+idle 367/400/394 rows (all match), loaded 351/352/348 (one no-match, two match);
+every request armed.
+
+Falsified: lost frames or stalls. With `VFS_SAVE_FED` the saved streams show a
+continuous frame counter (header bytes 2–3, little-endian, +1 per frame) in every
+capture, and no consecutive-frame jumps (mean abs diff > 2.5× median) in any. The
+remaining ~10% shorter loaded swipes come from larger measured lags (~40–47 vs
+33–41), not missing data; with 3 samples each it may be ordinary swipe variation.
+Header byte 6 alternates 0x08/0x18 (bit 4 unknown); bytes 4,5,7 are fixed 07 07 00.
+
+Daemon change: "finger captured" now logs decoded lines and stream bytes, and
+`VFS_SAVE_FED=<dir>` saves each fed swipe's stream and reconstructed PGM from the
+daemon path too (it was only in `run`). Fingerprint images: root-only dir, never a repo.
