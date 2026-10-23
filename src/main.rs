@@ -113,6 +113,12 @@ enum Command {
     WindowTest {
         #[arg(long, default_value_t = 6)]
         count: usize,
+        /// Save each window's decrypted stream that holds a finger (>= --min-contact
+        /// contact rows) here as swipe_NN.bin, for offline reconstruction work.
+        #[arg(long)]
+        save_dir: Option<PathBuf>,
+        #[arg(long, default_value_t = DEFAULT_MIN_CONTACT)]
+        min_contact: usize,
     },
     Daemon {
         /// Socket path (defaults to $FP_VIRTUAL_IMAGE).
@@ -269,7 +275,7 @@ fn main() -> Result<()> {
             virtimage::send_image(&sock, &fpx, fw as u32, fh as u32)?;
             println!("[+] captured a {w}x{h} swipe ({contact} contact rows) and fed {fw}x{fh} to virtual_image");
         }
-        Command::WindowTest { count } => {
+        Command::WindowTest { count, save_dir, min_contact } => {
             let mut dev = usb::Sensor::open()?;
             let mut rec = session::handshake(&dev, &cfg)?;
             let dli = image::DliConfig::load_main(&cli.base)?;
@@ -291,6 +297,13 @@ fn main() -> Result<()> {
                     lines.median_line_std(),
                     swipe
                 );
+                if let Some(dir) = &save_dir {
+                    if lines.contact_rows(image::CONTACT_SD) >= min_contact {
+                        let path = dir.join(format!("swipe_{n:02}.bin"));
+                        std::fs::write(&path, &stream)?;
+                        println!("[+] saved {}", path.display());
+                    }
+                }
             }
             cap.finish()?;
             println!("[+] finished after {:.1}s", t0.elapsed().as_secs_f32());
