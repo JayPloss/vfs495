@@ -54,7 +54,11 @@ threading.Thread(target=feeder, daemon=True).start()
 import gi; gi.require_version("FPrint", "2.0"); from gi.repository import FPrint, GLib
 ctx = FPrint.Context.new(); ctx.enumerate()
 dev = next(d for d in ctx.get_devices() if d.get_driver() == "virtual_image"); dev.open_sync()
+# VFS_TPL=i,j,...: enroll only these templates (lets a caller split the work across
+# processes; each process has its own virtual_image socket).
+tpl = {int(x) for x in os.environ.get("VFS_TPL", "").split(",") if x}
 for ti, (tn, timg) in enumerate(gen):
+    if tpl and ti not in tpl: continue
     cur["img"] = timg; time.sleep(0.3)
     t = FPrint.Print.new(dev); t.set_finger(FPrint.Finger.RIGHT_INDEX)
     try: t = dev.enroll_sync(t, None, None, None)
