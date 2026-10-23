@@ -56,9 +56,10 @@ const Q_MIN: f32 = 0.5;
 const SEC_CONTACT_SD: f32 = 15.0;
 const PEAK_LAG_MIN: usize = 4;
 const PEAK_DROP: f32 = 0.15;
-/// A line this many lags away from any measurement still uses the nearest one
-/// (the secondary leaves the skin ~L lines before the primary); farther away
-/// there is no speed evidence and nothing is emitted.
+/// Before the first or after the last lag measurement, a line this many lags away
+/// from it still uses it (the secondary leaves the skin ~L lines before the
+/// primary); farther out there is no speed evidence and nothing is emitted. Lines
+/// between measurements always advance (see `reconstruct_run`).
 const HOLD: f32 = 1.5;
 /// Contact runs: bridge gaps up to `RUN_BRIDGE` lines, ignore runs under `RUN_MIN`.
 const RUN_BRIDGE: usize = 20;
@@ -431,11 +432,31 @@ fn reconstruct_run(lines: &Lines, a: usize, b: usize, bg_pri: &[f32], bg_sec: &[
             g += 1;
         }
         let l = lag[t].max(1.0);
-        let moving = good_idx[g].abs_diff(t) as f32 <= HOLD * lag[t];
+        // Between the first and last measurement the skin is moving: culling already
+        // dropped the lines where it did not, so a gap in the measurements is a gap in
+        // the evidence (e.g. a low-contrast secondary over the core), not a stall.
+        // Freezing there collapsed whole stretches of skin into one row (torn images).
+        // Beyond the ends, only lines within HOLD lags of a measurement are emitted.
+        let interior = t >= good_idx[0] && t <= good_idx[good_idx.len() - 1];
+        let moving = interior || good_idx[g].abs_diff(t) as f32 <= HOLD * lag[t];
         if t + 1 < m {
             y[t + 1] = y[t] + if moving { SEP_ROWS / l } else { 0.0 };
             xs[t + 1] = xs[t] + if moving { dx[t] / l } else { 0.0 };
         }
+    }
+
+    // VFS_SWIPE_DUMP=<file>: per kept line t, raw path lag, good flag, smoothed lag,
+    // dx, y, x (offline diagnostics).
+    if let Ok(path_out) = std::env::var("VFS_SWIPE_DUMP") {
+        use std::fmt::Write as _;
+        let mut txt = String::new();
+        let mut gi = 0;
+        for t in 0..m {
+            let good = gi < good_idx.len() && good_idx[gi] == t;
+            if good { gi += 1; }
+            let _ = writeln!(txt, "{t} {} {} {:.2} {:.2} {:.2} {:.2} {:.3}", path[t] + LAG_MIN, good as u8, lag[t], dx[t], y[t], xs[t], c(t, path[t]));
+        }
+        let _ = std::fs::write(format!("{path_out}.{a}"), txt);
     }
 
     // Resample the primary line at integer skin rows.

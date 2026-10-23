@@ -1821,3 +1821,35 @@ Header byte 6 alternates 0x08/0x18 (bit 4 unknown); bytes 4,5,7 are fixed 07 07 
 Daemon change: "finger captured" now logs decoded lines and stream bytes, and
 `VFS_SAVE_FED=<dir>` saves each fed swipe's stream and reconstructed PGM from the
 daemon path too (it was only in `run`). Fingerprint images: root-only dir, never a repo.
+
+### 2026-10-22 — torn images fixed: lag-measurement gaps no longer freeze the skin position (ProBook, offline)
+Data: 19 swipes saved by the daemon (`VFS_SAVE_FED`, local only, never in git), right index,
+one evening. Metric: `scripts/eval_swipes.sh <dir> fed_17927162` (new; decodes every stream
+with the current build, all-pairs `pair_scores.py` split over 8 processes via `VFS_TPL`,
+mirrored copies of three prints as impostors). "subset" excludes the first 3 swipes, taken
+in a polkit dialog: they match each other (52-72) but little else, i.e. a different part of
+the finger, not a reconstruction problem.
+
+Baseline (56d1037): all 202/342 >= 40 (59%), median 42.0, mean 42.3 | subset 195/240 (81%),
+median 47.0, mean 50.9, min 26 | impostor max 3.
+
+**Cause of the visible horizontal tears** (`VFS_SWIPE_DUMP=<file>` now dumps the per-line
+track: raw Viterbi lag, good flag, smoothed lag, dx, y, x, NCC): in the torn swipe
+1792718129935 two stretches of ~85 culled lines had no accepted lag measurement (secondary
+contrast/peak tests fail, e.g. over the core), while the interpolated lag stayed ~17. The
+`HOLD` rule treated every line more than 1.5·L from a measurement as not moving, so 110
+lines advanced y by 0: whole stretches of skin collapsed into one row. But culling has
+already removed the lines where the skin did not move, so a gap in measurements is a gap in
+evidence, not a stall.
+
+Tried (one at a time, same metric):
+- HOLD = 4: all 224 (65%) median 53 | subset 216 (90%) median 56, min 29. Better.
+- HOLD = 10 / 1000 (never freeze): all 230 (67%) median 54 | subset 224 (93%) median 58,
+  min 25, impostor max 5. Per swipe no collapse (each within ±1 match of before); the torn
+  swipe went 4/15 -> 15/15.
+- **Kept: always advance between the first and last measurement; keep HOLD (1.5·L) only
+  beyond the ends** (where the secondary has left the skin and there really is no speed
+  evidence): all **248/342 (73%)**, median 54.5, mean 52.1 | subset **234/240 (98%)**,
+  median **61.5**, mean 62.9, **min 35** | impostor max 4.
+Not re-tested live yet. Enrolled prints were made with the old reconstruction, so installing
+this needs a re-enroll.
