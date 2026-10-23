@@ -53,17 +53,35 @@ enum Cue {
     Wait,
 }
 
-/// `VFS_CUE_LED=<name>` (e.g. `capslock`): light `/sys/class/leds/*<name>` while
+/// `VFS_CUE_LED=<name>` (e.g. `capslock`): blink `/sys/class/leds/*<name>` while
 /// a swipe window is open. The only cue available where no terminal is — at the
-/// login screen or under `sudo`, with the daemon running as a service.
+/// login screen or under `sudo`, with the daemon running as a service. It blinks
+/// rather than staying lit because a keyboard backlight lights the key steadily.
 fn cue_led(on: bool) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::OnceLock;
+    static BLINK: AtomicBool = AtomicBool::new(false);
+    static BLINKER: OnceLock<()> = OnceLock::new();
     let Ok(name) = std::env::var("VFS_CUE_LED") else { return };
-    let Ok(dir) = std::fs::read_dir("/sys/class/leds") else { return };
-    for entry in dir.flatten() {
-        if entry.file_name().to_string_lossy().ends_with(&name) {
-            let _ = std::fs::write(entry.path().join("brightness"), if on { "1" } else { "0" });
-        }
-    }
+    BLINK.store(on, Ordering::SeqCst);
+    BLINKER.get_or_init(|| {
+        let leds: Vec<_> = std::fs::read_dir("/sys/class/leds")
+            .map(|d| d.flatten().filter(|e| e.file_name().to_string_lossy().ends_with(&name))
+                .map(|e| e.path().join("brightness")).collect())
+            .unwrap_or_default();
+        let set = move |v: &str| for p in &leds { let _ = std::fs::write(p, v); };
+        std::thread::spawn(move || {
+            let mut lit = false;
+            loop {
+                let want = BLINK.load(Ordering::SeqCst) && !lit;
+                if want != lit {
+                    set(if want { "1" } else { "0" });
+                    lit = want;
+                }
+                std::thread::sleep(Duration::from_millis(250));
+            }
+        });
+    });
 }
 
 fn cue(c: Cue, print: bool) {
