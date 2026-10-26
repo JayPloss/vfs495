@@ -453,6 +453,27 @@ enum Armed {
     Stale,
 }
 
+/// Seconds since boot, counting time suspended (`/proc/uptime` is
+/// CLOCK_BOOTTIME; `Instant` is CLOCK_MONOTONIC, which stops during suspend).
+fn uptime() -> f64 {
+    std::fs::read_to_string("/proc/uptime")
+        .ok()
+        .and_then(|s| s.split_whitespace().next()?.parse().ok())
+        .unwrap_or(0.0)
+}
+
+/// Notices a system suspend since it was made.
+struct SleepWatch(f64, std::time::Instant);
+
+impl SleepWatch {
+    fn new() -> Self {
+        SleepWatch(uptime(), std::time::Instant::now())
+    }
+    fn slept(&self) -> bool {
+        uptime() - self.0 - self.1.elapsed().as_secs_f64() > 2.0
+    }
+}
+
 /// Calibrate now (no finger needed, LED off), then wait for a request with the
 /// calibration already done, so the first swipe window opens immediately.
 fn arm_and_serve(
@@ -464,6 +485,7 @@ fn arm_and_serve(
     once: bool,
 ) -> Result<Armed> {
     cap.prepare()?;
+    let sleep = SleepWatch::new();
     log::info!("armed: calibrated, waiting for a fingerprint request");
     // After a request, stay armed for REUSE_WINDOW so a follow-up (the lock
     // screen restarting its verify on wake) gets the LED at once instead of
@@ -472,6 +494,14 @@ fn arm_and_serve(
     loop {
         let wait = if fed.is_some() { REUSE_WINDOW } else { rearm_after() };
         let Some(listener) = virtimage::wait_for_request(sock, fprintd, Some(wait)) else { break };
+        // The sensor loses power in suspend and comes back uncalibrated; swipes
+        // on the old calibration came out as images that never matched
+        // (2026-10-25). Drop this connection (the request stays open and is
+        // picked up again) and rebuild the session and calibration first.
+        if sleep.slept() {
+            drop(listener);
+            bail!("system slept since calibration");
+        }
         log::info!("fingerprint requested; recording swipes");
         let n = serve_request(cap, listener, sock, dli, min_contact, fprintd, once)?;
         log::info!("request served: {n} swipe(s) fed");
