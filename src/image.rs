@@ -490,11 +490,12 @@ pub fn reconstruct(lines: &Lines, crop: bool) -> (Vec<u8>, usize, usize) {
 }
 
 /// Enlargement applied to a reconstructed swipe before it is fed to libfprint.
-/// NBIS finds too few stable minutiae in a 200-px-wide 508 dpi strip (libfprint's
-/// own narrow swipe drivers enlarge theirs for the same reason). Empirical, from
-/// four recorded swipes of one finger: best genuine bozorth3 score 9 at 1x, 26 at
-/// 1.5x, 14 at 2x (NOTES.md 2026-10-03).
-pub const FEED_SCALE: f32 = 1.5;
+/// 1.5 was chosen on 2026-10-03, when reconstruction was poor (best genuine score 9
+/// at 1x, 26 at 1.5x). With today's reconstruction 1x is far better: on 31 ProBook
+/// swipes, enrolled-vs-later pairs match 61% at 1x vs 11% at 1.5x, same-session 89%
+/// vs 69%, impostor max 24 vs 33; and 1.5x pushed long swipes past `MAX_FEED_ROWS`,
+/// so a different stretch was cropped off each time (NOTES.md 2026-10-30).
+pub const FEED_SCALE: f32 = 1.0;
 
 /// Bilinear resize by `factor`.
 pub fn upscale(px: &[u8], w: usize, h: usize, factor: f32) -> (Vec<u8>, usize, usize) {
@@ -523,7 +524,7 @@ pub fn upscale(px: &[u8], w: usize, h: usize, factor: f32) -> (Vec<u8>, usize, u
 /// Prepare a reconstructed swipe for libfprint: enlarge by [`FEED_SCALE`], then
 /// clamp to a central `MAX_FEED_ROWS` window (a taller image is rejected).
 pub fn window_for_feed(px: &[u8], w: usize, h: usize) -> (Vec<u8>, usize, usize) {
-    let (px, w, h) = upscale(px, w, h, FEED_SCALE);
+    let (px, w, h) = if FEED_SCALE == 1.0 { (px.to_vec(), w, h) } else { upscale(px, w, h, FEED_SCALE) };
     if h <= MAX_FEED_ROWS {
         return (px, w, h);
     }

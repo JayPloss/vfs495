@@ -1853,3 +1853,24 @@ Tried (one at a time, same metric):
   median **61.5**, mean 62.9, **min 35** | impostor max 4.
 Not re-tested live yet. Enrolled prints were made with the old reconstruction, so installing
 this needs a re-enroll.
+
+### 2026-10-30 — feed at 1x, not 1.5x (ProBook): enrolled-vs-later matching 11% -> 61% (offline)
+Symptom: after the 2026-10-25 failures, tonight's swipes scored 17-38 live against the
+Oct 22 enrollment (match >= 40). Saved swipes (`VFS_SAVE_FED`, local only) show the
+same finger and core as Oct 22; some carry a dark crease line and mottled ridges, which
+look like skin condition.
+
+Found: the daemon saves the reconstruction at 1x, but feeds libfprint
+`window_for_feed` = 1.5x bilinear enlargement, cropped to the central 500 rows. 1.5 was
+picked on 2026-10-03 (best genuine 9 at 1x, 26 at 1.5x) when reconstruction was poor. At
+1.5x a 400-row swipe becomes 600 rows and loses 100, a different stretch each swipe.
+
+Same 31 swipes (12 from Oct 22's enrollment session, 8 Oct 25, 11 tonight), all pairs
+through `pair_scores.py`, 3 mirrored impostors:
+- enrollment session vs tonight's slow swipes: **61% >= 40 at 1x** (median 46.5) vs 11%
+  at 1.5x (median 27);
+- within the enrollment session: 89% vs 69%; impostor max 24 (1x) vs 33 (1.5x).
+- Oct 25's swipes and tonight's three fast ones (237-255 rows at 1x) match nothing,
+  not even each other, at either scale: poor captures, not a scale problem.
+`FEED_SCALE` is now 1.0 (`upscale` is skipped). Prints enrolled at 1.5x don't match 1x
+probes, so installing this needs a re-enroll.
