@@ -62,7 +62,11 @@ const PEAK_DROP: f32 = 0.15;
 /// between measurements always advance (see `reconstruct_run`).
 const HOLD: f32 = 1.5;
 /// Contact runs: bridge gaps up to `RUN_BRIDGE` lines, ignore runs under `RUN_MIN`.
-const RUN_BRIDGE: usize = 20;
+/// A brief loss of contact mid-swipe left gaps of 22-124 lines in the saved swipes; at
+/// 20 it split the swipe and only the longer half was kept, so the image lost the core
+/// (2026-10-30: 14 of 61 saved swipes, most of that evening's failures). 100 rejoins
+/// all but one of them; separate touches in one window were 1000+ lines apart.
+const RUN_BRIDGE: usize = 100;
 const RUN_MIN: usize = 100;
 /// Fewest culled lines / lag measurements / output rows for a usable swipe.
 const MIN_CULLED: usize = 30;

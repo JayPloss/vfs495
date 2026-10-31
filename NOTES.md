@@ -1874,3 +1874,15 @@ through `pair_scores.py`, 3 mirrored impostors:
   not even each other, at either scale: poor captures, not a scale problem.
 `FEED_SCALE` is now 1.0 (`upscale` is skipped). Prints enrolled at 1.5x don't match 1x
 probes, so installing this needs a re-enroll.
+
+### 2026-10-30 (late) — split swipes: RUN_BRIDGE 20 -> 100 (offline 39/56 -> 46/56 vs the live print)
+Live after the 1x install: two of three swipes failed (scores 4-13), the third matched at 57. The
+failed images held only the lower half of the finger. `VFS_SWIPE_DEBUG` showed each was two
+contact runs split by a 28-40 line gap (a brief loss of contact mid-swipe), and
+`reconstruct_swipe` keeps only the run with the most rows. Across 61 saved swipes 14 were
+split this way (gaps 22-124 lines); separate touches in one window were 1000+ lines apart.
+Bridging 100 lines rejoins them: the 237-255 row halves come out 359-443 rows. Metric: print
+enrolled from the five Oct 22 enrollment swipes, every other saved swipe verified through
+libfprint, mirrored copies as impostors: 39/56 -> 46/56, impostors 0/56 both. The remaining
+misses are Oct 25's poor captures, the first Oct 22 swipes (another part of the finger) and one
+269-row swipe. The live print (built at bridge 20) scores the same 46/56, so no rebuild needed.
