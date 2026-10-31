@@ -1878,7 +1878,7 @@ probes, so installing this needs a re-enroll.
 ### 2026-10-30 (late) — split swipes: RUN_BRIDGE 20 -> 100 (offline 39/56 -> 46/56 vs the live print)
 Live after the 1x install: two of three swipes failed (scores 4-13), the third matched at 57. The
 failed images held only the lower half of the finger. `VFS_SWIPE_DEBUG` showed each was two
-contact runs split by a 28-40 line gap (a brief loss of contact mid-swipe), and
+contact runs split by a 28-40 line gap (lines the contact check marked "no finger"; likely faint lines misread, not a lift), and
 `reconstruct_swipe` keeps only the run with the most rows. Across 61 saved swipes 14 were
 split this way (gaps 22-124 lines); separate touches in one window were 1000+ lines apart.
 Bridging 100 lines rejoins them: the 237-255 row halves come out 359-443 rows. Metric: print
